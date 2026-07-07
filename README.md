@@ -71,6 +71,10 @@ question and waits for an answer. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full data-flow and
 persistence model.
 
+<p align="center">
+  <img src="imgs/without-kernel-comparison.png" alt="Without the kernel: chaotic cycles, stalls, leaked intent. With salient-core: a typed bus, cycle detection, and operator gates." width="900">
+</p>
+
 ## How it compares
 
 | | salient-core | LangGraph | CrewAI / AutoGen |
