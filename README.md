@@ -20,6 +20,72 @@ coordination layer that generalizes to any domain.
 **Showcase application:** [salient-tutor](https://github.com/baggybin/salient-tutor) —
 a Socratic teaching agent built on this kernel.
 
+## Why salient-core
+
+Reach for it when you have **more than one Claude agent that must cooperate**,
+you **don't trust each agent with the others' tool surfaces**, and you want a
+**human in the approval loop**. The kernel provides the coordination glue you'd
+otherwise hand-roll: a typed inter-agent bus, per-tool-call policy gates
+enforced *below* the model (so a compromised or confused agent still can't
+exceed its scope), an operator inbox for decisions that need a human, and a
+cross-session knowledge graph that persists what agents learn.
+
+What makes it distinct from in-process orchestrators (LangGraph, CrewAI,
+AutoGen): coordination happens over an **MCP bus** rather than a Python call
+graph, policy is a **default-deny gate under the model** rather than a prompt
+convention, and delegation is **operator-mediated** rather than fully
+autonomous.
+
+**When *not* to use it:** single-agent workflows (the coordination layer is
+overhead you don't need), non-Claude backends today (v1 requires the Claude
+Agent SDK; other SDKs are a v2 goal behind the `AgentBackend` seam), or if you
+want a no-code / hosted orchestration runtime — this is a library kernel you
+wire into your own daemon.
+
+## How it works
+
+Every agent runs its own Claude SDK loop with a single **bus MCP server**
+attached. When an agent calls a tool, the call passes through the **scope +
+safeguard gates** *before* it executes; anything that needs a human is routed
+to the **operator inbox**; what agents learn is corroborated into a shared
+**knowledge graph**. The kernel's value is this topology, not any one box:
+
+```mermaid
+flowchart LR
+    OP([Operator]) -- prompt --> D[Daemon]
+    D --> RA[AgentRunner A]
+    RA -- bus tool call --> G{Scope +<br/>safeguard gate}
+    G -- deny --> RA
+    G -- allow --> T[Tool / delegation]
+    T -- needs a human --> INBOX[[Operator inbox]]
+    INBOX -. answer .-> OP
+    T -- delegate --> RB[AgentRunner B]
+    T -- learned facts --> KG[(Knowledge graph)]
+    RB -- result --> RA
+    RA -- result --> OP
+```
+
+A denied call never runs. A delegation to another agent, or a decision the
+model isn't allowed to make alone, lands in the operator inbox as a typed
+question and waits for an answer. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full data-flow and
+persistence model.
+
+## How it compares
+
+| | salient-core | LangGraph | CrewAI / AutoGen |
+|---|---|---|---|
+| **Coordination primitive** | typed **MCP bus** per agent | in-process state graph | in-process agent/role objects |
+| **Policy / gating** | **default-deny gate below the model**, per tool call | prompt- / code-level, in-graph | prompt-level convention |
+| **Human-in-the-loop** | first-class **operator inbox** (typed Q/A) | interrupts / checkpoints | optional human proxy |
+| **Cross-session memory** | **noisy-OR knowledge graph** w/ corroboration + embeddings | checkpointer state | external memory add-ons |
+| **Isolation** | per-agent tool subprocess, optional privilege separation | shared process | shared process |
+| **Backends** | Claude SDK today (`AgentBackend` seam for more) | many LLMs | many LLMs |
+
+The trade is deliberate: salient-core is narrower (Claude-native, library-not-
+runtime) in exchange for **enforced** scoping and **mediated** delegation —
+built for settings where agents must be *constrained*, not merely orchestrated.
+
 ## What's in the kernel
 
 | Component | What it does |
@@ -29,7 +95,62 @@ a Socratic teaching agent built on this kernel.
 | **Policy gates** | Scope + safeguards enforced *below* the model — default-deny on every tool invocation |
 | **Operator inbox** | Typed question/answer pattern for anything that needs a human decision |
 | **SM-2 scheduler** | Spaced-repetition gradebook for durable recall tracking |
-| **Runner** | Claude-SDK-specific agent runner (v1), behind a `DaemonServices` Protocol seam for multi-SDK v2; per-agent tool subprocesses can be privilege-separated via an opaque `_launch_profile` seam |
+| **[`ask_fable`](src/salient_core/ask_fable/README.md)** | Gated MCP sidecar: any agent can request narrow code/architecture reasoning from Fable (`claude-fable-5`), behind the same denylist guard + a hashed, owner-only audit log — concrete proof the policy gates are real, not aspirational (optional `[ask-fable]` extra) |
+| **Runner** | **Today: requires the Claude Agent SDK** (v1). The `AgentBackend` / `DaemonServices` Protocols exist so v2 can host other SDKs — none are implemented yet. Per-agent tool subprocesses can be privilege-separated via an opaque `_launch_profile` seam |
+
+## Requirements
+
+- **Python ≥ 3.11**
+- **[`claude-agent-sdk`](https://pypi.org/project/claude-agent-sdk/) `>=0.2.110,<0.3`** —
+  pulled in automatically. The runner drives Claude agents through it, so you
+  need Claude access: either an `ANTHROPIC_API_KEY`, or (for the `ask_fable`
+  sidecar) an existing Claude Code OAuth session.
+- Optional extra: `pip install 'salient-core[ask-fable]'` adds the `mcp`
+  transport for the [`ask_fable`](src/salient_core/ask_fable/README.md) reasoning
+  server.
+
+> **Default-deny, out of the box.** The kernel ships with an *empty* scope and
+> safeguard dataset, and the scope gate defaults to **deny** — an engagement
+> with no scope set refuses **every** tool call. Populate `ScopeStore` /
+> `SafeguardConfig` at startup (see [`docs/EXTRACTION.md`](docs/EXTRACTION.md#data-tables))
+> before agents can do anything. This is intentional: policy is opt-in-safe.
+
+## Quick start
+
+```bash
+pip install salient-core
+```
+
+### Run the multi-agent showcase
+
+The kernel's actual job — fanning one prompt across a panel of agents over the
+bus, capturing each leg's reasoning, and scoring **semantic convergence** —
+runs offline with no API key:
+
+```bash
+pip install salient-core starlette uvicorn
+cd examples/consensus_panel
+uvicorn server:app --reload      # → http://127.0.0.1:8055
+```
+
+This exercises the real `ask_consensus` machinery
+(`salient_core.bus._consensus`): same-prompt fan-out, per-leg trace capture,
+embedding-based agreement scoring, and the parameterizable judge. See
+[`examples/consensus_panel/`](examples/consensus_panel/README.md) for how to
+swap the mock runner for live models. For a full application built on the
+kernel, see [`salient-tutor`](https://github.com/baggybin/salient-tutor).
+
+### Standalone modules
+
+Several pieces work without wiring up the full daemon — e.g. the SM-2
+scheduler and the knowledge graph:
+
+```python
+from salient_core.tutor.schedule import next_interval_days, next_mastery
+
+interval = next_interval_days(prev_days=7.0, grade="good")  # → ~16.1
+mastery = next_mastery(prev_mastery=0.5, grade="easy")      # → ~0.75
+```
 
 ## Seams
 
@@ -61,25 +182,6 @@ class MyDaemon:
 
 See [`docs/EXTRACTION.md`](docs/EXTRACTION.md) for the full guide and the
 complete seam catalogue in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-
-## Quick start
-
-```bash
-pip install salient-core
-```
-
-```python
-from salient_core.memory.kg import KnowledgeGraph
-from salient_core.tutor.schedule import next_interval_days, next_mastery
-from salient_core.coord.questions import QuestionInbox
-
-# The scheduler is standalone — use it without the full daemon
-interval = next_interval_days(prev_days=7.0, grade="good")  # → ~16.1
-mastery = next_mastery(prev_mastery=0.5, grade="easy")      # → ~0.75
-```
-
-For a full working example, see
-[`salient-tutor`](https://github.com/baggybin/salient-tutor).
 
 ## Architecture
 
