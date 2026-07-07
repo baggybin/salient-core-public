@@ -155,7 +155,7 @@ mechanism lives skin-side.
 
 ## Minimal example
 
-See [`salient-tutor`](https://github.com/baggybin/salient-tutor) for a
+See [`salient-tutor`](https://github.com/baggybin/salient-tutor-public) for a
 complete working example — a teaching agent that composes the kernel's
 bus, KG, scheduler, and questions inbox into a Socratic coach.
 

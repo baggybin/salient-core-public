@@ -17,7 +17,7 @@ The kernel was extracted from Salient, a multi-agent security orchestrator
 (private). The security-specific code stayed behind; what's here is the
 coordination layer that generalizes to any domain.
 
-**Showcase application:** [salient-tutor](https://github.com/baggybin/salient-tutor) —
+**Showcase application:** [salient-tutor](https://github.com/baggybin/salient-tutor-public) —
 a Socratic teaching agent built on this kernel.
 
 ## Why salient-core
@@ -142,7 +142,7 @@ This exercises the real `ask_consensus` machinery
 embedding-based agreement scoring, and the parameterizable judge. See
 [`examples/consensus_panel/`](examples/consensus_panel/README.md) for how to
 swap the mock runner for live models. For a full application built on the
-kernel, see [`salient-tutor`](https://github.com/baggybin/salient-tutor).
+kernel, see [`salient-tutor`](https://github.com/baggybin/salient-tutor-public).
 
 ### Standalone modules
 

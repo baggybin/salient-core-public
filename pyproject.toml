@@ -56,7 +56,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# Ship the PEP 561 marker so downstream apps (salient-tutor, downstream skins)
+# Ship the PEP 561 marker so downstream apps (salient-tutor-public, downstream skins)
 # type-check against the kernel's annotations, plus the runtime prompt addenda
 # the runner factory loads when assembling agent system prompts.
 [tool.setuptools.package-data]
