@@ -5,7 +5,7 @@
 
 ![salient-core — a multi-agent coordination kernel](imgs/social-preview.jpg)
 
-[![CI](https://github.com/baggybin/salient-core-public/actions/workflows/ci.yml/badge.svg)](https://github.com/baggybin/salient-core-public/actions/workflows/ci.yml)
+[![CI](https://github.com/baggybin/salient-core/actions/workflows/ci.yml/badge.svg)](https://github.com/baggybin/salient-core/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 `salient-core` is a generic agent-coordination kernel — the infrastructure
@@ -17,7 +17,7 @@ The kernel was extracted from Salient, a multi-agent security orchestrator
 (private). The security-specific code stayed behind; what's here is the
 coordination layer that generalizes to any domain.
 
-**Showcase application:** [salient-tutor](https://github.com/baggybin/salient-tutor-public) —
+**Showcase application:** [salient-tutor](https://github.com/baggybin/salient-tutor) —
 a Socratic teaching agent built on this kernel.
 
 ## Why salient-core
@@ -127,7 +127,7 @@ This exercises the real `ask_consensus` machinery
 embedding-based agreement scoring, and the parameterizable judge. See
 [`examples/consensus_panel/`](examples/consensus_panel/README.md) for how to
 swap the mock runner for live models. For a full application built on the
-kernel, see [`salient-tutor`](https://github.com/baggybin/salient-tutor-public).
+kernel, see [`salient-tutor`](https://github.com/baggybin/salient-tutor).
 
 ### Standalone modules
 
