@@ -1,6 +1,6 @@
 """Overlay clean text onto Atlas-generated diagram bases (v4).
 
-Pipeline (see docs/IMAGES.md):
+Pipeline:
   1. Generate base image — Nano Banana Pro Ultra (hero + social) and
      Seedream v4.5 (without-kernel) on Atlas Cloud.
   2. Resize base to working size: 2400-wide hero, 1600x900 social,
