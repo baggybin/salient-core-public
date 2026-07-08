@@ -48,22 +48,7 @@ Every agent runs its own Claude SDK loop with a single **bus MCP server**
 attached. When an agent calls a tool, the call passes through the **scope +
 safeguard gates** *before* it executes; anything that needs a human is routed
 to the **operator inbox**; what agents learn is corroborated into a shared
-**knowledge graph**. The kernel's value is this topology, not any one box:
-
-```mermaid
-flowchart LR
-    OP([Operator]) -- prompt --> D[Daemon]
-    D --> RA[AgentRunner A]
-    RA -- bus tool call --> G{Scope +<br/>safeguard gate}
-    G -- deny --> RA
-    G -- allow --> T[Tool / delegation]
-    T -- needs a human --> INBOX[[Operator inbox]]
-    INBOX -. answer .-> OP
-    T -- delegate --> RB[AgentRunner B]
-    T -- learned facts --> KG[(Knowledge graph)]
-    RB -- result --> RA
-    RA -- result --> OP
-```
+**knowledge graph**. The kernel's value is this topology, not any one box.
 
 A denied call never runs. A delegation to another agent, or a decision the
 model isn't allowed to make alone, lands in the operator inbox as a typed
