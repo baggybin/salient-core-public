@@ -1,21 +1,33 @@
 # salient-core
 
-> A multi-agent coordination kernel with policy gates, knowledge graph,
-> and operator-mediated delegation.
+> An auditable, policy-first coordination kernel for high-consequence local agents.
 
-![salient-core — a multi-agent coordination kernel](imgs/social-preview.jpg)
+![salient-core — an auditable, policy-first agent-coordination kernel](imgs/social-preview.jpg)
 
 [![CI](https://github.com/baggybin/salient-core/actions/workflows/ci.yml/badge.svg)](https://github.com/baggybin/salient-core/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-`salient-core` is a generic agent-coordination kernel — the infrastructure
-for running multiple Claude agents concurrently, each scoped to a single
-tool surface, coordinated through a typed inter-agent bus with
-operator-mediated approval gates.
+`salient-core` is a coordination kernel for running multiple local agents in
+settings where **the cost of a wrong action is high** — so every tool call is
+gated *below the model*, and every decision is written to an auditable trail.
+Agents run concurrently on your own infrastructure, each scoped to a single tool
+surface, coordinated over a typed inter-agent bus with a human operator in the
+approval loop.
+
+Two properties define it:
+
+- **Policy-first.** Scope and safeguard gates run *below* the model on every
+  tool invocation and default to **deny** — a confused or compromised agent
+  still cannot exceed its scope. Policy is the substrate, not a prompt
+  convention layered on top.
+- **Auditable.** Every scope decision, tool call, and operator answer is
+  persisted — with secrets redacted — so you can reconstruct exactly what each
+  agent did, what was allowed or denied, and why. Built for work you must be
+  able to *prove* after the fact, not merely trust in the moment.
 
 The kernel was extracted from Salient, a multi-agent security orchestrator
 (private). The security-specific code stayed behind; what's here is the
-coordination layer that generalizes to any domain.
+coordination layer that generalizes to any high-consequence domain.
 
 **Showcase application:** [salient-tutor](https://github.com/baggybin/salient-tutor) —
 a Socratic teaching agent built on this kernel.
@@ -23,12 +35,14 @@ a Socratic teaching agent built on this kernel.
 ## Why salient-core
 
 Reach for it when you have **more than one Claude agent that must cooperate**,
-you **don't trust each agent with the others' tool surfaces**, and you want a
-**human in the approval loop**. The kernel provides the coordination glue you'd
-otherwise hand-roll: a typed inter-agent bus, per-tool-call policy gates
-enforced *below* the model (so a compromised or confused agent still can't
-exceed its scope), an operator inbox for decisions that need a human, and a
-cross-session knowledge graph that persists what agents learn.
+you **don't trust each agent with the others' tool surfaces**, you want a
+**human in the approval loop**, and you need to **prove afterward what every
+agent did**. The kernel provides the coordination glue you'd otherwise
+hand-roll: a typed inter-agent bus, per-tool-call policy gates enforced *below*
+the model (so a compromised or confused agent still can't exceed its scope), an
+operator inbox for decisions that need a human, a redacted audit trail of every
+gate decision and tool call, and a cross-session knowledge graph that persists
+what agents learn.
 
 What makes it distinct from in-process orchestrators (LangGraph, CrewAI,
 AutoGen): coordination happens over an **MCP bus** rather than a Python call
@@ -67,6 +81,7 @@ persistence model.
 | **Coordination primitive** | typed **MCP bus** per agent | in-process state graph | in-process agent/role objects |
 | **Policy / gating** | **default-deny gate below the model**, per tool call | prompt- / code-level, in-graph | prompt-level convention |
 | **Human-in-the-loop** | first-class **operator inbox** (typed Q/A) | interrupts / checkpoints | optional human proxy |
+| **Auditability** | **redacted, replayable trail** of every gate decision + tool call | app-level logging | app-level logging |
 | **Cross-session memory** | **noisy-OR knowledge graph** w/ corroboration + embeddings | checkpointer state | external memory add-ons |
 | **Isolation** | per-agent tool subprocess, optional privilege separation | shared process | shared process |
 | **Backends** | Claude SDK today (`AgentBackend` seam for more) | many LLMs | many LLMs |
@@ -82,6 +97,7 @@ built for settings where agents must be *constrained*, not merely orchestrated.
 | **Bus-as-MCP** | ~40 typed inter-agent tools (delegation, context, KG, discovery, audit) exposed as a single MCP server per agent, with an `extra_tools` slot for domain add-ons |
 | **Noisy-OR KG** | Cross-session knowledge graph with corroboration, embeddings, and archive-first compaction |
 | **Policy gates** | Scope + safeguards enforced *below* the model — default-deny on every tool invocation |
+| **Audit trail** | Scope decisions, tool I/O, and operator answers persisted with secret redaction — a replayable record of what ran and what was denied, plus a sticky degraded-health flag when a record can't be written |
 | **Operator inbox** | Typed question/answer pattern for anything that needs a human decision |
 | **SM-2 scheduler** | Spaced-repetition gradebook for durable recall tracking |
 | **[`ask_fable`](src/salient_core/ask_fable/README.md)** | Gated MCP sidecar: any agent can request narrow code/architecture reasoning from Fable (`claude-fable-5`), behind the same denylist guard + a hashed, owner-only audit log — concrete proof the policy gates are real, not aspirational (optional `[ask-fable]` extra) |
