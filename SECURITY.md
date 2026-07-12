@@ -8,7 +8,7 @@ responsibly:
 1. **Do NOT open a public GitHub issue.**
 2. Use GitHub's private vulnerability reporting: go to the repository's
    **Security** tab → **Report a vulnerability**
-   (<https://github.com/baggybin/salient-core-public/security/advisories/new>).
+   (<https://github.com/baggybin/salient-core/security/advisories/new>).
    Include a description and, if possible, a proof of concept.
 3. You will receive an acknowledgment within 48 hours.
 4. A fix will be prioritized based on severity.

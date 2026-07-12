@@ -26,10 +26,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/baggybin/salient-core-public"
-Repository = "https://github.com/baggybin/salient-core-public"
-Issues = "https://github.com/baggybin/salient-core-public/issues"
-Changelog = "https://github.com/baggybin/salient-core-public/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/baggybin/salient-core"
+Repository = "https://github.com/baggybin/salient-core"
+Issues = "https://github.com/baggybin/salient-core/issues"
+Changelog = "https://github.com/baggybin/salient-core/blob/main/CHANGELOG.md"
 
 [project.scripts]
 # Standalone launcher for the ask_fable MCP server (also `python -m salient_core.ask_fable`).
@@ -61,7 +61,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# Ship the PEP 561 marker so downstream apps (salient-tutor-public, downstream skins)
+# Ship the PEP 561 marker so downstream apps (salient-tutor, downstream skins)
 # type-check against the kernel's annotations, plus the runtime prompt addenda
 # the runner factory loads when assembling agent system prompts.
 [tool.setuptools.package-data]

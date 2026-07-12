@@ -23,6 +23,11 @@ Second public snapshot, consolidating the `0.7.x` line (`0.7.0`–`0.7.6`).
 ### Changed
 - Bus substitute routing skips operator-disabled candidates.
 - `ask_agents` "any" mode cancels sibling legs like "race".
+- README repositioned around the project's actual goal — maximum operator
+  control over agents — rather than orchestration-framework comparison; Codex
+  provider and the `codex` extra documented.
+- Package metadata and in-repo links point at the canonical repository names
+  (`baggybin/salient-core`, `baggybin/salient-tutor`).
 
 ### Fixed
 - Runner no longer re-prompts a delegated agent that replied in text

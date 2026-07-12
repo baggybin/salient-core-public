@@ -17,7 +17,7 @@ prefer landing them before publish.
 ## Development setup
 
 ```bash
-git clone https://github.com/baggybin/salient-core-public.git
+git clone https://github.com/baggybin/salient-core.git
 cd salient-core
 pip install -e ".[dev]"
 pre-commit install
