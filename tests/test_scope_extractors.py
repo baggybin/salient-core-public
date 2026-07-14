@@ -118,10 +118,106 @@ class GenericExtractorTests(unittest.TestCase):
             )
         self.assertIn("refused", str(cm.exception))
 
+    def test_raw_argv_refuses_decimal_encoded_ip(self):
+        # 167772165 == inet_aton(10.0.0.5). Without this, a raw_argv command
+        # naming an integer-encoded host extracts zero targets -> the scope gate
+        # allows the call (empty targets -> allowed) -> out-of-scope reach.
+        with self.assertRaises(ExtractorError) as cm:
+            extract_targets(ExtractorSpec(fields={"cmd": "raw_argv"}), {"cmd": "nmap 167772165"})
+        self.assertIn("integer-encoded IP", str(cm.exception))
+
+    def test_raw_argv_refuses_octal_dotted_ip(self):
+        # 012.0.0.5 -> inet_aton reads the leading-zero octet as octal (012 = 10).
+        with self.assertRaises(ExtractorError) as cm:
+            extract_targets(ExtractorSpec(fields={"cmd": "raw_argv"}), {"cmd": "nmap 012.0.0.5"})
+        self.assertIn("octal-encoded IP", str(cm.exception))
+
+    def test_raw_argv_allows_small_ints_and_ports(self):
+        # Integers below 2**24 (ports, small counts) are not IP-shaped and must
+        # not trip the refusal; a real dotted target alongside still extracts.
+        ts = extract_targets(
+            ExtractorSpec(fields={"cmd": "raw_argv"}),
+            {"cmd": "nmap -p 8080 --top-ports 1000 10.0.0.5"},
+        )
+        self.assertEqual(_kv(ts), [("ip", "10.0.0.5")])
+
     def test_raw_argv_no_target_allows(self):
         self.assertEqual(
             extract_targets(ExtractorSpec(fields={"cmd": "raw_argv"}), {"cmd": "ls /tmp"}), []
         )
+        # A few more benign, target-less local commands must still pass.
+        for cmd in ("jobs -l", "cat ./notes", "python3 -c \"print('a'+'b')\""):
+            self.assertEqual(
+                extract_targets(ExtractorSpec(fields={"cmd": "raw_argv"}), {"cmd": cmd}),
+                [],
+                cmd,
+            )
+
+    # ── raw_argv hardening: IPv6 sweep, NFKC, decode→exec, spliced literals ──
+    def test_raw_argv_extracts_ipv6(self):
+        # IPv6 targets were invisible to the (IPv4-only) sweep before — a raw_argv
+        # command naming one extracted nothing → the scope gate never checked it.
+        ts = extract_targets(
+            ExtractorSpec(fields={"cmd": "raw_argv"}), {"cmd": "ssh 2001:db8::1"}
+        )
+        self.assertEqual(_kv(ts), [("ip", "2001:db8::1")])
+
+    def test_raw_argv_extracts_ipv6_zone_id(self):
+        # `%zone` is dropped before the scope check (the finding cited zoned IPv6
+        # as an evasion — the shape gate rejects the `%`, so it used to slip).
+        ts = extract_targets(
+            ExtractorSpec(fields={"cmd": "raw_argv"}), {"cmd": "ping6 fe80::1%eth0"}
+        )
+        self.assertEqual(_kv(ts), [("ip", "fe80::1")])
+
+    def test_raw_argv_ipv6_lookalike_not_a_target(self):
+        # A colon-run that isn't a valid IPv6 address (`12:00:00`) must be dropped,
+        # not refused — it names no target, so the command is allowed.
+        self.assertEqual(
+            extract_targets(ExtractorSpec(fields={"cmd": "raw_argv"}), {"cmd": "sleep 12:00:00"}),
+            [],
+        )
+
+    def test_raw_argv_nfkc_normalizes_unicode_digits(self):
+        # Full-width / homoglyph digits collapse to ASCII before the sweep, so an
+        # address can't dodge the IPv4 regex by spelling its digits in Unicode.
+        ts = extract_targets(
+            ExtractorSpec(fields={"cmd": "raw_argv"}),
+            {"cmd": "curl １０.0.0.5"},  # '10.0.0.5' in full-width digits
+        )
+        self.assertEqual(_kv(ts), [("ip", "10.0.0.5")])
+
+    def test_raw_argv_refuses_decode_into_exec(self):
+        # A decode wrapper feeding a dynamic-exec sink hides the target entirely.
+        for cmd in (
+            "python3 -c \"import base64;exec(base64.b64decode('Zm9v'))\"",
+            "echo Zm9v | base64 -d | sh",
+            "python3 -c \"import codecs;exec(codecs.decode('sbb','rot13'))\"",
+        ):
+            with self.assertRaises(ExtractorError) as cm:
+                extract_targets(ExtractorSpec(fields={"cmd": "raw_argv"}), {"cmd": cmd})
+            self.assertIn("dynamic-exec sink", str(cm.exception), cmd)
+
+    def test_raw_argv_allows_decoder_without_exec_sink(self):
+        # A lone decoder that writes to a file (no exec sink) is NOT refused —
+        # requiring BOTH wrapper and sink keeps false positives bounded.
+        self.assertEqual(
+            extract_targets(
+                ExtractorSpec(fields={"cmd": "raw_argv"}),
+                {"cmd": "base64 -d ./blob > ./out"},
+            ),
+            [],
+        )
+
+    def test_raw_argv_refuses_spliced_address(self):
+        # An address reassembled from adjacent quoted fragments dodges the
+        # contiguous-token regex; refuse the splice.
+        with self.assertRaises(ExtractorError) as cm:
+            extract_targets(
+                ExtractorSpec(fields={"cmd": "raw_argv"}),
+                {"cmd": "ping '1'+'0.'+'0.'+'0.'+'5'"},
+            )
+        self.assertIn("spliced", str(cm.exception))
 
     def test_optional_kinds_empty_returns_empty(self):
         self.assertEqual(extract_targets(ExtractorSpec(fields={"x": "ip_optional"}), {"x": ""}), [])

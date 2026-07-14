@@ -169,6 +169,24 @@ Migrate one agent at a time:
 See the seam table in [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) for every seam,
 its module, and its default.
 
+### `raw_argv` is best-effort, not authoritative
+
+The `raw_argv` extractor (used by `builtin.Bash` and every `*.run` shell escape)
+runs a **static regex sweep** over free-form shell/Python to find IP/host/URL
+targets, then scope-checks whatever it finds. It fails **closed** on the
+obfuscation it recognizes — shell/process substitution, hex/integer/octal-encoded
+IPs, unbound `$VARs`, a decode wrapper feeding a dynamic-exec sink
+(`exec(base64.b64decode(...))`, `base64 -d | sh`), and addresses spliced across
+adjacent string literals — and Unicode-normalizes (NFKC) before matching so
+homoglyph digits can't slip an address past the sweep. It does **not** promise to
+find every target: a runtime-computed string, a novel encoding, or multi-call
+`/tmp` indirection can still name a host the sweep can't see. When the sweep finds
+nothing the command is allowed (the contract is "if it names a target, that target
+must be in scope" — `ls /tmp` legitimately names none), so treat `raw_argv` as one
+layer of defense-in-depth behind the typed message bus and operator approval, not a
+sealed boundary. Prefer routing target-bearing work through typed tool factories
+(`nmap`, `ssh`, …) with explicit target fields, which get authoritative extraction.
+
 ## Per-agent privilege separation (`_launch_profile`)
 
 To isolate an agent's tool subprocess behind OS-level capability boundaries,

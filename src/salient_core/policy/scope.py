@@ -34,6 +34,7 @@ import socket
 import sqlite3
 import subprocess
 import time
+import unicodedata
 import urllib.parse
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -631,8 +632,68 @@ _RX_OBFUSCATION = re.compile(
 _RX_ENVSET = re.compile(r"^([A-Z_][A-Z_0-9]*)=", re.IGNORECASE)
 _RX_ENVREF = re.compile(r"\$\{?([A-Z_][A-Z_0-9]*)\}?", re.IGNORECASE)
 
+# ── encoded-payload execution ────────────────────────────────────────────────
+# A decode/transform wrapper that turns an opaque blob back into runnable
+# text/bytes. On its own this is harmless (`base64 -d blob > out.bin`); it only
+# hides a target when its output is fed to a dynamic-exec sink (below).
+_RX_DECODE_WRAPPER = re.compile(
+    r"\bb64decode\b|\bbase64\b\s*(?:\.\w+|-d\b|--decode\b)|"
+    r"\bunhexlify\b|\bfromhex\b|"
+    r"\bcodecs\.(?:decode|getdecoder)\b|"
+    r"rot[_-]?13",
+    re.IGNORECASE,
+)
+# A sink that runs decoded text/bytes as code. `exec`/`eval`/`os.system`/
+# `subprocess`/`Popen` and shell `| sh` / `sh -c` are the common ones.
+_RX_EXEC_SINK = re.compile(
+    r"\bexec\s*\(|\beval\s*\(|\bexecfile\b|\bos\.system\b|\bsubprocess\b|"
+    r"\bPopen\b|\bcheck_output\b|\bcheck_call\b|"
+    r"\|\s*(?:ba)?sh\b|\b(?:ba)?sh\s+-c\b",
+    re.IGNORECASE,
+)
+# An address reassembled from adjacent quoted fragments joined by `+`
+# (`'1'+'0.'+'0.'+'0.'+'5'`) never presents a contiguous dotted-quad/IPv6 to the
+# token sweep. Require a `.` or `:` inside at least one of the two joined
+# fragments so plain word concatenation (`'a'+'b'`) is not refused.
+_RX_SPLICED_ADDRESS = re.compile(
+    r"""['"][0-9a-f]*[.:][0-9a-f.:]*['"]\s*\+\s*['"][0-9a-f.:]*['"]"""
+    r"""|['"][0-9a-f.:]*['"]\s*\+\s*['"][0-9a-f]*[.:][0-9a-f.:]*['"]""",
+    re.IGNORECASE,
+)
+
+
+def _encoded_exec_obfuscation(text: str) -> str | None:
+    """Refuse a decode/transform wrapper whose output feeds a dynamic-exec sink
+    (e.g. `python -c "exec(base64.b64decode('…'))"`, `base64 -d blob | sh`,
+    `codecs.decode(x,'rot13')` into `exec`). The decoded payload never reaches
+    the token sweep, so the real target is invisible to scope. Requiring BOTH a
+    wrapper AND a sink keeps false positives bounded — a lone decoder that writes
+    to a file, or a lone `subprocess` call with no encoding, is left alone."""
+    if _RX_DECODE_WRAPPER.search(text) and _RX_EXEC_SINK.search(text):
+        return "encoded payload fed to a dynamic-exec sink"
+    return None
+
 _RX_IPV4_TOKEN = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?\b")
 _RX_URL_TOKEN = re.compile(r"https?://[^\s'\"`<>|;&]+", re.IGNORECASE)
+# IPv6 CANDIDATE token: 2+ colon-separated hex groups (so a single-colon
+# `host:port` or a `12:00` time never matches), optional `::` compression,
+# optional `%zone` id, optional `/prefix`. This is deliberately loose — real
+# validation is `ipaddress.ip_address` inside `_classify_token`, which drops
+# any candidate that isn't a genuine IPv6 address (the sweep swallows the
+# ExtractorError). Without this, an IPv6 target in a raw_argv command extracts
+# nothing → the scope gate never checks it (only an IPv4 regex existed before).
+# Boundaries exclude ALL word chars (not just hex) so a scope-resolution token
+# like `sekurlsa::logonpasswords` or `Foo::Bar` — `word::word`, which looks like
+# compressed IPv6 — is not matched mid-identifier. A real address is preceded by
+# whitespace / `[` / `=` / `@` / quote, all non-word.
+_RX_IPV6_TOKEN = re.compile(
+    r"(?<![\w:%.])"
+    r"(?:[0-9a-f]{0,4}:){2,}[0-9a-f]{0,4}"
+    r"(?:%[0-9a-z_.-]+)?"
+    r"(?:/\d{1,3})?"
+    r"(?![\w:%.])",
+    re.IGNORECASE,
+)
 # Boundary assertions:
 #   (?<!\\)  — refuse matches preceded by a literal backslash, so `\n`, `\t`,
 #              `\x`, `\u` escapes inside python/JSON string literals don't
@@ -1013,8 +1074,39 @@ def _sweep_tokens(
     for m in _RX_IPV4_TOKEN.finditer(text):
         if _overlaps(m.start(), m.end(), seen_spans):
             continue
+        tok = m.group(0)
+        # A dotted-quad with a zero-padded octet (012.0.0.5) is octal IP
+        # obfuscation — refuse loudly rather than silently drop it (it would
+        # otherwise fail strict IP parse and be swallowed, leaving the command
+        # target-less -> allowed).
+        if _has_leading_zero_octet(tok):
+            raise ExtractorError(
+                f"octal-encoded IP {tok!r} (leading-zero octet; inet_aton "
+                f"reads it as octal). Use canonical dotted notation."
+            )
         try:
-            targets.append(_classify_token(m.group(0), source_field=field))
+            targets.append(_classify_token(tok, source_field=field))
+            seen_spans.append((m.start(), m.end()))
+        except ExtractorError:
+            pass
+    for m in _RX_IPV6_TOKEN.finditer(text):
+        if _overlaps(m.start(), m.end(), seen_spans):
+            continue
+        # Drop a `%zone` scope-id (`fe80::1%eth0`) before classifying: it's
+        # irrelevant to the scope check and `_classify_token`'s shape gate
+        # rejects the `%`, which would otherwise let a zoned address slip
+        # through as an unrecognized (→ unchecked) token.
+        cand = m.group(0).split("%", 1)[0]
+        # A colon-only match (`::`, `:::`) is the unspecified/loopback shorthand
+        # with no hextet — skip it rather than mint a spurious `::` target from a
+        # stray double-colon in prose/code.
+        if not any(c in "0123456789abcdefABCDEF" for c in cand):
+            continue
+        try:
+            # `_classify_token` runs `ipaddress.ip_address`, so a candidate that
+            # isn't a real IPv6 address (`12:00:00`, `a:b:c`) raises and is
+            # skipped here — only genuine addresses become scope-checked targets.
+            targets.append(_classify_token(cand, source_field=field))
             seen_spans.append((m.start(), m.end()))
         except ExtractorError:
             pass
@@ -1054,8 +1146,59 @@ def _is_locally_bound(var_name: str, text_before: str) -> bool:
     return any(re.search(p, text_before) for p in patterns)
 
 
+# A standalone run of 8-10 digits — the width of a 32-bit integer (2**24 =
+# 16777216 is 8 digits, 2**32-1 = 4294967295 is 10). Bounded by non-word,
+# non-dot so it never fires inside `0x0a000005`, a dotted-quad octet, or a
+# longer identifier. Range is checked in code (regex can't compare magnitude).
+_RX_BARE_INT = re.compile(r"(?<![\w.])(\d{8,10})(?![\w.])")
+
+
+def _bare_int_ip_encoding(text: str) -> str | None:
+    """Refuse a standalone integer that inet_aton would read as a full IPv4
+    address (>= 2**24, so the high byte is non-zero — e.g. 167772165 = 10.0.0.5).
+
+    Unlike `0x…` hex, a bare integer carries no explicit encoding signal, so we
+    can't tell "encoded target" from "large count/timestamp" — and this only
+    runs in the raw_argv obfuscation path, where a target-bearing command that
+    names an integer-encoded host would otherwise slip the scope gate entirely
+    (empty extraction -> allowed). Fail closed: the operator restates a real
+    target in dotted notation. Values < 2**24 (ports, small counts) are left
+    alone; dotted forms are handled by the IPv4 sweep."""
+    for m in _RX_BARE_INT.finditer(text):
+        val = int(m.group(1))
+        if (1 << 24) <= val < (1 << 32):
+            dotted = ipaddress.ip_address(val)
+            return (
+                f"integer-encoded IP {m.group(1)} (inet_aton reads it as "
+                f"{dotted}). Use canonical dotted notation ({dotted}) so the "
+                f"scope gate can check the target."
+            )
+    return None
+
+
+def _has_leading_zero_octet(token: str) -> bool:
+    """True if a dotted-quad-shaped token has a zero-padded octet (012.0.0.5).
+    inet_aton reads a leading-zero octet as OCTAL (012 -> 10), so this is IP
+    obfuscation; no legitimate address zero-pads its octets."""
+    host = token.split("/", 1)[0]
+    parts = host.split(".")
+    if len(parts) != 4:
+        return False
+    return any(len(p) > 1 and p[0] == "0" for p in parts)
+
+
 def _is_obfuscated(text: str) -> str | None:
     """Return a description if the text contains obfuscation we refuse, else None."""
+    # Bare integer-encoded IPs carry no `0x`-style signal the regex can anchor
+    # on, so check them independently of (and before) the pattern sweep.
+    bare = _bare_int_ip_encoding(text)
+    if bare:
+        return bare
+    enc = _encoded_exec_obfuscation(text)
+    if enc:
+        return enc
+    if _RX_SPLICED_ADDRESS.search(text):
+        return "address spliced across adjacent string literals"
     m = _RX_OBFUSCATION.search(text)
     if not m:
         return None
@@ -1216,6 +1359,13 @@ def _extract_one(
             text = "\n".join(str(t) for t in raw if str(t).strip())
         else:
             text = str(raw)
+        # Collapse Unicode compatibility forms (full-width / homoglyph digits and
+        # letters) to their ASCII equivalents BEFORE detection + sweep, so an
+        # address written with fancy digits (`１０.０.０.５`, `𝟣𝟢.𝟢.𝟢.𝟧`) reduces to
+        # `10.0.0.5` and is caught by the same IPv4 / integer / host detectors as
+        # its plain-ASCII spelling. Detection-only: the executed command is never
+        # touched — we only inspect this normalized copy for scope-check purposes.
+        text = unicodedata.normalize("NFKC", text)
         if not text.strip():
             if optional:
                 return []
@@ -1236,8 +1386,20 @@ def _extract_one(
         if not targets:
             # No remote target named. The scope contract is "IF a command names
             # a target, that target must be in scope" — not "every command must
-            # name one" (`ls /tmp`, `jobs -l`). Anything that goes on the wire
-            # would have produced an IP/host/URL token and been checked.
+            # name one" (`ls /tmp`, `jobs -l`). A flat command that goes on the
+            # wire would have produced an IP/host/URL token and been checked.
+            #
+            # BEST-EFFORT, NOT AUTHORITATIVE. This is a static regex sweep over
+            # free-form shell/Python, so it is deliberately one layer of
+            # defense-in-depth, not a sealed boundary. The obfuscation detector
+            # above fails CLOSED on the evasions it recognizes (substitution,
+            # encoded IPs, unbound $VARs, decode→exec, spliced literals), but a
+            # sufficiently determined command can still name a target the sweep
+            # can't see (runtime-computed strings, novel encodings, multi-call
+            # /tmp indirection). Those are the message-bus + operator-approval
+            # layers' job to catch — NOT a guarantee this function makes. Route
+            # target-bearing work through the typed tool factories (nmap, ssh,
+            # …) wherever possible rather than `*.run` shell escapes.
             return []
         return targets
 
