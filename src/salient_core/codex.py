@@ -32,6 +32,27 @@ from .runtime import (
 
 _EMPTY_TOOL_BUNDLE = ToolBundle()
 
+# Appended to a codex agent's baseInstructions when it carries bus tools.
+# codex >=0.144 hardcodes `tool_search_always_defer_mcp_tools=true`, so the
+# salient bus tools are lazy-loaded behind the built-in `tool_search` tool and
+# do NOT appear in the model's initial tool list — an agent that just calls
+# `ask_agent` sees it "not available". Teach the model to surface them first.
+# (Not needed on codex <=0.142, where MCP tools load directly; harmless there.)
+_CODEX_BUS_LAZY_LOAD_OVERLAY = (
+    "\n\n---\n"
+    "TOOL LOADING (codex runtime). ALL of your tools from the `salient` tool "
+    "server are LAZY-LOADED and will NOT appear in your initial tool list — both "
+    "your task tools (the tool surface described above) AND your coordination "
+    "tools: delegation (ask_agent, ask_agents, list_agents), knowledge graph "
+    "(kg_assert, kg_query), shared context, and the rest. Before your FIRST use "
+    "of any of them, invoke the `tool_search` tool with a query naming what you "
+    "need (e.g. `ask_agent delegate to another agent`, or a keyword from the task "
+    "tool you want). tool_search returns the matching tool names; call them by "
+    "their exact names. If a tool looks unavailable, you have not searched for it "
+    "yet — call `tool_search` first; never report a salient tool missing without "
+    "searching. Only codex-native tools are available without searching."
+)
+
 
 class CodexUnavailableError(RuntimeError):
     def __init__(self) -> None:
@@ -370,7 +391,20 @@ def _default_client_factory(
         return approval_handler(method, normalized)
 
     client: _CodexClient = CodexClient(
-        config=CodexConfig(cwd=config.cwd, env=env),
+        config=CodexConfig(
+            cwd=config.cwd,
+            env=env,
+            # codex >=0.144 hardcodes `tool_search_always_defer_mcp_tools=true`
+            # (stage "removed" in `codex features list` — NOT overridable via
+            # --config or the runtime feature-enablement RPC), so external-MCP
+            # tools (the salient bus) are lazy-loaded through the `tool_search`
+            # tool and surface PREFIXED as `mcp__salient.ask_agent`, etc. Flip
+            # `non_prefixed_mcp_tool_names` (stage "under development" — this one
+            # IS honored) so tool_search returns the bare names (ask_agent,
+            # kg_*, …) the agent prompts already reference. The lazy-load itself
+            # is taught to the model via the bus overlay in `create_backend`.
+            config_overrides=("features.non_prefixed_mcp_tool_names=true",),
+        ),
         approval_handler=sdk_approval_handler,
     )
     return client
@@ -908,11 +942,15 @@ class CodexProvider:
 
             gateway = self._gateway or get_codex_mcp_gateway()
             credential = gateway.issue(str(config.get("agent_name", "codex")), tool_bundle)
+            # Teach the model that its bus tools are lazy-loaded behind
+            # `tool_search` (codex >=0.144). Without this, a delegation hub like
+            # `manager` reports "ask_agent not available" instead of searching.
+            bus_instructions = (instructions or "") + _CODEX_BUS_LAZY_LOAD_OVERLAY
             backend_config = CodexBackendConfig(
                 cwd=cwd,
                 model=model,
                 effort=effort,
-                instructions=instructions,
+                instructions=bus_instructions,
                 env={credential.bearer_token_env_var: credential.token},
                 mcp_config={
                     "mcp_servers": {**mcp_servers, SALIENT_MCP_SERVER: credential.codex_config()}

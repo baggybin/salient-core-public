@@ -390,6 +390,96 @@ def test_codex_provider_passes_isolated_mcp_credential_and_revokes() -> None:
     assert revoked == ["secret-token"]
 
 
+def _capture_bus_backend_config(*, instructions: str | None, has_tools: bool) -> Any:
+    """Build a backend via CodexProvider and return the CodexBackendConfig the
+    client factory observed (its `.instructions` carry any appended overlay)."""
+    from salient_core.codex import CodexProvider
+
+    class Credential:
+        token = "t"
+        bearer_token_env_var = "SALIENT_CODEX_MCP_TOKEN"
+
+        @staticmethod
+        def codex_config() -> dict[str, Any]:
+            return {
+                "url": "http://127.0.0.1:1/mcp",
+                "bearer_token_env_var": "SALIENT_CODEX_MCP_TOKEN",
+            }
+
+    class Gateway:
+        def issue(self, owner: str, bundle: ToolBundle) -> Credential:
+            return Credential()
+
+        def revoke(self, token: str) -> None:
+            return None
+
+        async def wait_attached(self, token: str, timeout: float = 25.0) -> None:
+            return None
+
+    observed: list[Any] = []
+
+    def factory(**kwargs: Any) -> _FakeClient:
+        observed.append(kwargs["config"])
+        return _FakeClient(approval_handler=kwargs["approval_handler"])
+
+    async def handler(arguments):
+        return arguments
+
+    bundle = ToolBundle((AgentTool("ask_agent", "", {}, handler),)) if has_tools else ToolBundle()
+    cfg: dict[str, Any] = {"agent_name": "manager", "cwd": "/tmp"}
+    if instructions is not None:
+        cfg["instructions"] = instructions
+    backend = CodexProvider(client_factory=factory, gateway=Gateway()).create_backend(
+        cfg, tool_bundle=bundle
+    )
+
+    async def scenario() -> None:
+        await backend.connect()
+        await backend.disconnect()
+
+    asyncio.run(scenario())
+    return observed[0]
+
+
+def test_codex_bus_agent_instructions_teach_tool_search_lazy_load() -> None:
+    """codex >=0.144 hard-defers MCP tools behind `tool_search`, so a bus agent
+    must be told to search before delegating — otherwise it reports "ask_agent
+    not available". The overlay is appended to the agent's own instructions."""
+    from salient_core.codex import _CODEX_BUS_LAZY_LOAD_OVERLAY
+
+    observed = _capture_bus_backend_config(instructions="You coordinate.", has_tools=True)
+    assert observed.instructions is not None
+    assert observed.instructions.startswith("You coordinate.")
+    assert _CODEX_BUS_LAZY_LOAD_OVERLAY in observed.instructions
+    assert "tool_search" in observed.instructions
+    assert "ask_agent" in observed.instructions
+
+
+def test_codex_non_bus_agent_gets_no_lazy_load_overlay() -> None:
+    """An agent with no bus tools has nothing deferred — no overlay noise."""
+    from salient_core.codex import _CODEX_BUS_LAZY_LOAD_OVERLAY
+
+    observed = _capture_bus_backend_config(instructions="Be exact.", has_tools=False)
+    assert observed.instructions == "Be exact."
+    assert _CODEX_BUS_LAZY_LOAD_OVERLAY not in (observed.instructions or "")
+
+
+def test_default_client_factory_requests_bare_mcp_tool_names() -> None:
+    """The deferred bus tools surface PREFIXED (`mcp__salient.ask_agent`) unless
+    `non_prefixed_mcp_tool_names` is flipped — flip it so tool_search returns the
+    bare names the prompts reference. (This flag IS honored; the defer flag is
+    not.)"""
+    from salient_core.codex import CodexBackendConfig, _default_client_factory
+
+    def approve(_m: str, _p: Any) -> dict[str, Any]:
+        return {"decision": "decline"}
+
+    client = _default_client_factory(
+        approval_handler=approve, config=CodexBackendConfig(cwd="/tmp")
+    )
+    assert "features.non_prefixed_mcp_tool_names=true" in client.config.config_overrides
+
+
 def test_daemon_codex_approval_uses_operator_inbox_verdicts() -> None:
     from salient_core.codex import ApprovalDecision, ApprovalRequest, ApprovalResolution
     from salient_core.daemon._runner_factory import _RunnerFactoryMixin
