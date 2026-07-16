@@ -673,6 +673,7 @@ def _encoded_exec_obfuscation(text: str) -> str | None:
         return "encoded payload fed to a dynamic-exec sink"
     return None
 
+
 _RX_IPV4_TOKEN = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?\b")
 _RX_URL_TOKEN = re.compile(r"https?://[^\s'\"`<>|;&]+", re.IGNORECASE)
 # IPv6 CANDIDATE token: 2+ colon-separated hex groups (so a single-colon

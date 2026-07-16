@@ -157,9 +157,7 @@ class GenericExtractorTests(unittest.TestCase):
     def test_raw_argv_extracts_ipv6(self):
         # IPv6 targets were invisible to the (IPv4-only) sweep before — a raw_argv
         # command naming one extracted nothing → the scope gate never checked it.
-        ts = extract_targets(
-            ExtractorSpec(fields={"cmd": "raw_argv"}), {"cmd": "ssh 2001:db8::1"}
-        )
+        ts = extract_targets(ExtractorSpec(fields={"cmd": "raw_argv"}), {"cmd": "ssh 2001:db8::1"})
         self.assertEqual(_kv(ts), [("ip", "2001:db8::1")])
 
     def test_raw_argv_extracts_ipv6_zone_id(self):
