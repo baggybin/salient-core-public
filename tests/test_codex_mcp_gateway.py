@@ -115,6 +115,69 @@ def test_blocking_delegation_tools_get_a_long_gateway_timeout() -> None:
     assert cfg["tool_timeout_sec"] == _BLOCKING_TOOL_TIMEOUT_SEC
 
 
+def test_long_foreground_tools_get_an_arg_and_schema_aware_timeout() -> None:
+    # The blunt 120s bound killed legitimately-long foreground tools (a full scan,
+    # a crack run) at 2 min under codex. Now: a tool that DECLARES timeout_s in its
+    # schema (author signal it's long-capable) gets the long ceiling even when the
+    # model omits the arg; an explicit model-supplied timeout_s is honored but
+    # FLOORED at the base bound and CLAMPED at the hard max (it's model-controlled,
+    # untrusted input); a plain tool with neither stays at the tight 120s.
+    from salient_core.codex_mcp import (
+        _HARD_MAX_TOOL_TIMEOUT_SEC,
+        _TOOL_TIMEOUT_SEC,
+        _TOOL_TIMEOUT_SLOP_SEC,
+        _tool_timeout,
+    )
+
+    long_schema = {"type": "object", "properties": {"timeout_s": {"type": "number"}}}
+    plain_schema = {"type": "object", "properties": {"target": {"type": "string"}}}
+
+    # Schema declares timeout_s, caller omits it → hard-max backstop (its own
+    # internal timeout fires first for well-behaved tools).
+    assert _tool_timeout("sniff_capture", {}, long_schema) == _HARD_MAX_TOOL_TIMEOUT_SEC
+    # No schema, no arg → tight bound (unchanged behavior).
+    assert _tool_timeout("scanner_scan", {}, plain_schema) == _TOOL_TIMEOUT_SEC
+    assert _tool_timeout("scanner_scan") == _TOOL_TIMEOUT_SEC
+    # Explicit caller timeout_s → declared + slop, honored.
+    assert (
+        _tool_timeout("sniff_capture", {"timeout_s": 900}, long_schema)
+        == 900 + _TOOL_TIMEOUT_SLOP_SEC
+    )
+    # Absurd model value is clamped to the hard max (no pinning open near the 4h cap).
+    assert (
+        _tool_timeout("sniff_capture", {"timeout_s": 10**9}, long_schema)
+        == _HARD_MAX_TOOL_TIMEOUT_SEC
+    )
+    # A tiny model value is floored at the base bound (can't cut legit work shorter).
+    assert _tool_timeout("sniff_capture", {"timeout_s": 5}, long_schema) == _TOOL_TIMEOUT_SEC
+    # Stringified number (models do this) is coerced; junk/bool are ignored.
+    assert (
+        _tool_timeout("sniff_capture", {"timeout_s": "900"}, long_schema)
+        == 900 + _TOOL_TIMEOUT_SLOP_SEC
+    )
+    assert _tool_timeout("x", {"timeout_s": "nope"}, plain_schema) == _TOOL_TIMEOUT_SEC
+    assert _tool_timeout("x", {"timeout_s": True}, plain_schema) == _TOOL_TIMEOUT_SEC
+    # keyspace's real 7200s crack budget fits under the hard max (the whole point).
+    assert (
+        _tool_timeout("keyspace_run", {"timeout_s": 7200}, long_schema)
+        <= _HARD_MAX_TOOL_TIMEOUT_SEC
+    )
+    assert _tool_timeout("keyspace_run", {"timeout_s": 7200}, long_schema) >= 7200
+
+    # Non-finite MODEL-controlled input MUST NOT crash: without a finiteness
+    # guard, inf (reachable as JSON `Infinity`, or `float("1e400")`/`"1e400"`)
+    # reaches `int(inf)` → unhandled OverflowError on the dispatch hot path. It is
+    # rejected → falls back to the schema/default ceiling, never an exception.
+    for bad in (float("inf"), float("nan"), "inf", "1e400", "nan"):
+        assert (
+            _tool_timeout("sniff_capture", {"timeout_s": bad}, long_schema)
+            == _HARD_MAX_TOOL_TIMEOUT_SEC
+        )
+        assert _tool_timeout("scanner_scan", {"timeout_s": bad}, plain_schema) == _TOOL_TIMEOUT_SEC
+    # A huge FINITE int must not overflow float() either — it's capped to the hard max.
+    assert _tool_timeout("x", {"timeout_s": 10**400}, long_schema) == _HARD_MAX_TOOL_TIMEOUT_SEC
+
+
 def test_gateway_resolves_server_qualified_tool_name() -> None:
     # Codex forwards MCP tools under a server-qualified name, and salient's
     # per-agent prompts use the Claude wire form "mcp__bus__<alias>__<tool>"

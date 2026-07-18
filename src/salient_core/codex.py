@@ -392,6 +392,15 @@ def _default_client_factory(
 
     client: _CodexClient = CodexClient(
         config=CodexConfig(
+            # Opt-in seam to run a DIFFERENT codex binary than the bundled
+            # `openai-codex-cli-bin` — e.g. a newer system codex that advertises
+            # models the pinned bundle rejects ("model requires a newer version of
+            # Codex"). Unset SALIENT_CODEX_BIN → None → the SDK resolves the bundled
+            # binary exactly as before (no behavior change). Set it to an absolute
+            # path (e.g. the system `codex`) to override. This is a local/operator
+            # escape hatch, NOT a substitute for bumping the bundled pin for
+            # reproducible clean installs.
+            codex_bin=os.environ.get("SALIENT_CODEX_BIN") or None,
             cwd=config.cwd,
             env=env,
             # codex >=0.144 hardcodes `tool_search_always_defer_mcp_tools=true`

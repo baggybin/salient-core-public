@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import json
 import logging
+import math
 import secrets
 import select
 import socket
@@ -50,10 +51,86 @@ _TOOL_TIMEOUT_SEC: Final = 120
 # timeout — with its proper "did not reply within wait window" error — always fires
 # first. Non-blocking tools keep the tight 120s bound.
 _BLOCKING_TOOL_TIMEOUT_SEC: Final = 4 * 3600 + 300  # 4h + slop
+# Ceiling for a NON-blocking handler that is nonetheless legitimately long. Many
+# security tools take a caller-supplied `timeout_s` and internally default to a
+# `long_timeout_seconds` config (up to 7200s for keyspace) — the blunt 120s bound
+# killed them mid-run under Codex. We honor a longer budget for these but CLAMP it
+# to a hard max, because the caller's `timeout_s` is MODEL-CONTROLLED input: an
+# absurd value must not pin a handler open near the 4h blocking cap. The clamp
+# sits above the largest configured tool default (keyspace 7200s) + slop so a
+# well-behaved tool's OWN timeout fires first, and below _BLOCKING_TOOL_TIMEOUT_SEC.
+# NOTE: this bounds the CLIENT-VISIBLE wait, not a handler that swallows
+# cancellation (that leaks a coroutine past the deadline — a pre-existing property,
+# same shape as the ListenerRegistry background-and-reap pattern; the real fix is a
+# reaper + a concurrency cap on long-ceiling handlers, both out of scope here).
+_HARD_MAX_TOOL_TIMEOUT_SEC: Final = 7800  # 2h10m — covers keyspace 7200 + margin
+_TOOL_TIMEOUT_SLOP_SEC: Final = 60
 
 
-def _tool_timeout(bare_name: str) -> int:
-    return _BLOCKING_TOOL_TIMEOUT_SEC if bare_name.startswith("ask_") else _TOOL_TIMEOUT_SEC
+def _positive_timeout(raw: object) -> float | None:
+    """Coerce a caller-supplied `timeout_s` to a positive, FINITE number of
+    seconds, or None. It is MODEL-controlled, untrusted input, so reject bool
+    (an int subclass), non-finite floats (inf / nan, reachable as `Infinity`
+    over JSON or via a huge string like '1e400'), and non-numerics. A huge int
+    is capped to the hard max BEFORE float() so `float(10**400)` can't overflow;
+    a non-finite float is rejected so the caller's `int(declared)` can't raise
+    OverflowError on the dispatch hot path. Numeric strings are accepted (models
+    sometimes stringify numbers)."""
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        if raw <= 0:
+            return None
+        return float(min(raw, _HARD_MAX_TOOL_TIMEOUT_SEC))
+    if isinstance(raw, float):
+        return raw if (raw > 0 and math.isfinite(raw)) else None
+    if isinstance(raw, str):
+        try:
+            val = float(raw.strip())  # '1e400' -> inf (not an error), 'nan' -> nan
+        except ValueError:
+            return None
+        return val if (val > 0 and math.isfinite(val)) else None
+    return None
+
+
+def _schema_declares_timeout(schema: object) -> bool:
+    """True when the tool's INPUT SCHEMA declares a top-level `timeout_s`
+    property — an AUTHOR-controlled (trusted, static, model-unreachable) signal
+    that the handler is long-capable, so it earns the long ceiling even when the
+    caller omits the arg. Distinct from reading `timeout_s` out of the
+    model-controlled args."""
+    if not isinstance(schema, Mapping):
+        return False
+    props = schema.get("properties")
+    return isinstance(props, Mapping) and "timeout_s" in props
+
+
+def _tool_timeout(
+    bare_name: str,
+    args: Mapping[str, object] | None = None,
+    schema: object | None = None,
+) -> int:
+    """Per-call gateway ceiling.
+
+    - `ask_*` delegation tools manage their own long wait internally → 4h.
+    - Otherwise, honor an explicit caller `timeout_s` (floored at the base 120s
+      so a tiny model value can't cut legit work, clamped at the hard max).
+    - Else, if the tool's schema DECLARES `timeout_s` (author says long-capable),
+      give it the hard-max backstop — its OWN internal timeout fires first.
+    - Else the tight 120s bound.
+
+    `args`/`schema` default to None so the pure-name call form stays valid."""
+    if bare_name.startswith("ask_"):
+        return _BLOCKING_TOOL_TIMEOUT_SEC
+    declared = _positive_timeout((args or {}).get("timeout_s"))
+    if declared is not None:
+        return min(
+            max(int(declared) + _TOOL_TIMEOUT_SLOP_SEC, _TOOL_TIMEOUT_SEC),
+            _HARD_MAX_TOOL_TIMEOUT_SEC,
+        )
+    if _schema_declares_timeout(schema):
+        return _HARD_MAX_TOOL_TIMEOUT_SEC
+    return _TOOL_TIMEOUT_SEC
 
 
 _SHARED_GATEWAY: CodexMcpGateway | None = None
@@ -366,9 +443,11 @@ class CodexMcpGateway:
         if tool is None:
             return 404, self._error(request_id, -32602, f"unknown tool: {name!r}")
 
-        # Blocking delegation tools (ask_*) manage their own long wait; everything
-        # else stays on the tight 120s bound.
-        tool_timeout = _tool_timeout(tool.name)
+        # Blocking delegation tools (ask_*) manage their own long wait; a tool that
+        # declares `timeout_s` (or whose caller passes one) earns a longer, clamped
+        # ceiling; everything else stays on the tight 120s bound. Both deadlines
+        # below derive from this single value, so they can't skew.
+        tool_timeout = _tool_timeout(tool.name, arguments, tool.input_schema)
 
         async def invoke() -> JsonValue:
             # Loop-side deadline: bounds the coroutine even if the HTTP thread
