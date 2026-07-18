@@ -1,0 +1,12 @@
+{
+  "body": {
+    "args": {
+      "path": "/allowed/hello.txt"
+    },
+    "tool": "remote.read_file"
+  },
+  "id": "call-fixed-id",
+  "session": "sess-1",
+  "type": "call",
+  "v": 1
+}

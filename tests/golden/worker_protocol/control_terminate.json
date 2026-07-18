@@ -1,0 +1,9 @@
+{
+  "body": {
+    "op": "terminate_session"
+  },
+  "id": "ctl-term-id",
+  "session": "sess-1",
+  "type": "control",
+  "v": 1
+}

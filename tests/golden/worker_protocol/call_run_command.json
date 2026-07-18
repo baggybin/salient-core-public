@@ -1,0 +1,17 @@
+{
+  "body": {
+    "args": {
+      "argv": [
+        "uname",
+        "-a"
+      ],
+      "shell": false,
+      "timeout_s": 30
+    },
+    "tool": "remote.run_command"
+  },
+  "id": "call-run-id",
+  "session": "sess-1",
+  "type": "call",
+  "v": 1
+}

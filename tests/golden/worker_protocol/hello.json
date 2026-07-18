@@ -1,0 +1,13 @@
+{
+  "body": {
+    "arch": "amd64",
+    "hostname": "lab-box",
+    "os": "linux",
+    "protocol_version": 1,
+    "root": "/allowed",
+    "worker_version": "0.1.0"
+  },
+  "id": "hello-fixed-id",
+  "type": "hello",
+  "v": 1
+}
