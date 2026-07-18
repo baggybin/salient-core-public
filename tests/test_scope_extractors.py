@@ -153,6 +153,18 @@ class GenericExtractorTests(unittest.TestCase):
                 cmd,
             )
 
+    def test_raw_argv_refuses_unresolved_operator_infra_placeholders(self):
+        for command in ("nc <lhost> <lport>", "curl http://<LHOST>:<LPORT>/"):
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(
+                    ExtractorError,
+                    "unresolved operator-infrastructure placeholder",
+                ):
+                    extract_targets(
+                        ExtractorSpec(fields={"cmd": "raw_argv"}),
+                        {"cmd": command},
+                    )
+
     # ── raw_argv hardening: IPv6 sweep, NFKC, decode→exec, spliced literals ──
     def test_raw_argv_extracts_ipv6(self):
         # IPv6 targets were invisible to the (IPv4-only) sweep before — a raw_argv
@@ -222,10 +234,10 @@ class GenericExtractorTests(unittest.TestCase):
         self.assertEqual(extract_targets(ExtractorSpec(fields={"x": "host_optional"}), {}), [])
 
     def test_none_spec_returns_empty(self):
-        self.assertEqual(extract_targets(ExtractorSpec(none=True), {"x": "10.0.0.5"}), [])
+        self.assertEqual(extract_targets(ExtractorSpec(none=True), {"x": "<lhost>"}), [])
 
     def test_local_only_spec_returns_empty(self):
-        self.assertEqual(extract_targets(ExtractorSpec(local_only=True), {"x": "10.0.0.5"}), [])
+        self.assertEqual(extract_targets(ExtractorSpec(local_only=True), {"x": "<lhost>"}), [])
 
     def test_at_least_one_raises_when_none_present(self):
         with self.assertRaises(ExtractorError):

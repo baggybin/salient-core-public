@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -213,6 +214,24 @@ def test_session_scope_bypasses_until_strict_mode_is_enabled() -> None:
     assert (strict.kind, strict.allowed) == (ScopeEvaluationKind.EXTRACTION_DENIED, False)
 
 
+def test_unresolved_operator_infra_placeholder_fails_closed_before_dispatch() -> None:
+    # Given a raw command whose only apparent destination is a redaction placeholder.
+    store = scope.ScopeStore(None, "placeholder")
+    spec = scope.ExtractorSpec(fields={"command": "raw_argv"})
+    invocation = _invocation(
+        "alpha.run",
+        {"command": "nc <lhost> <lport>"},
+    )
+
+    # When the invocation is evaluated through the transport-neutral scope gate.
+    result = _evaluate(invocation, store, _dataset({"alpha.run": spec}))
+
+    # Then it is an extraction denial, never an allowed empty-target call.
+    assert result.allowed is False
+    assert result.kind is ScopeEvaluationKind.EXTRACTION_DENIED
+    assert "unresolved operator-infrastructure placeholder" in result.reason
+
+
 def test_research_scope_uses_public_lane_until_disabled() -> None:
     # Given a passive research target that is outside strict engagement scope.
     store = scope.ScopeStore(None, "research")
@@ -252,6 +271,98 @@ def test_strict_evaluation_preserves_one_shot_consumption() -> None:
     # Then the successful first call consumes the rule before the second.
     assert first.allowed is True
     assert second.allowed is False
+
+
+# ── probe mode (read-only preview) — the anti-drift + purity guarantees ──────
+# `evaluate_scope(mode="probe")` must return the IDENTICAL verdict as enforce
+# while writing no audit row and consuming no one-shot rule. These are the
+# council-mandated guardrails for the `scope gate-probe` operator command: a
+# probe that could disagree with the gate, or that mutates state, is worse than
+# no probe.
+
+
+def _evaluate_mode(invocation, store, dataset, mode):
+    return anyio.run(functools.partial(evaluate_scope, invocation, store, dataset, mode=mode))
+
+
+# (dataset specs, qualified name, raw input, in-scope rule) covering every
+# audit-writing / verdict-bearing branch reachable with built-in kinds.
+_PROBE_MATRIX = [
+    ({"a.scan": scope.ExtractorSpec(none=True)}, "a.scan", {"x": "1"}, None),
+    ({"a.scan": scope.ExtractorSpec(local_only=True)}, "a.scan", {"x": "1"}, None),
+    ({}, "a.scan", {"x": "1"}, None),  # unclassified → fail-closed deny
+    (
+        {"a.scan": scope.ExtractorSpec(fields={"target": "host"})},
+        "a.scan",
+        {"target": "host.example"},
+        "host.example",
+    ),  # strict allow
+    (
+        {"a.scan": scope.ExtractorSpec(fields={"target": "host"})},
+        "a.scan",
+        {"target": "evil.example"},
+        "host.example",
+    ),  # strict deny
+]
+
+
+def test_probe_verdict_matches_enforce_across_fixtures() -> None:
+    """Anti-drift: probe returns the same `allowed` AND `kind` as enforce for
+    every branch. The whole risk is a probe that says allow when the gate denies."""
+    for specs, qn, raw, in_rule in _PROBE_MATRIX:
+        store = scope.ScopeStore(None, "matrix")
+        if in_rule:
+            store.add_adhoc(in_rule, reason="in")
+        dataset = _dataset(specs)
+        inv = _invocation(qn, raw)
+        # probe first — it must not perturb the subsequent enforce verdict.
+        probe = _evaluate_mode(inv, store, dataset, "probe")
+        enforce = _evaluate_mode(inv, store, dataset, "enforce")
+        assert probe.allowed == enforce.allowed, (qn, raw, probe.reason, enforce.reason)
+        assert probe.kind == enforce.kind, (qn, raw)
+
+
+def test_probe_does_not_consume_one_shot() -> None:
+    """A one-shot allow-rule survives any number of probes, and is spent only by
+    the first ENFORCE call — the read-only guarantee for single-use auth."""
+    store = scope.ScopeStore(None, "probe-oneshot")
+    store.add_adhoc("one.example", one_shot=True, reason="single")
+    dataset = _dataset({"a.scan": scope.ExtractorSpec(fields={"target": "host"})})
+    inv = _invocation("a.scan", {"target": "one.example"})
+    assert _evaluate_mode(inv, store, dataset, "probe").allowed is True
+    assert _evaluate_mode(inv, store, dataset, "probe").allowed is True  # still live
+    assert _evaluate_mode(inv, store, dataset, "enforce").allowed is True  # consumes it
+    assert _evaluate_mode(inv, store, dataset, "enforce").allowed is False  # now spent
+    assert _evaluate_mode(inv, store, dataset, "probe").allowed is False  # probe agrees
+
+
+def test_probe_writes_no_audit_row(tmp_path: Path) -> None:
+    """Probe mode is durably read-only: no scope_decisions row for any branch
+    that enforce would audit (local_only / unclassified / strict allow+deny).
+    Uses a file-backed store so the audit table (_conn) actually exists."""
+    cases = [
+        (
+            {"a.scan": scope.ExtractorSpec(fields={"target": "host"})},
+            "a.scan",
+            {"target": "host.example"},
+        ),
+        (
+            {"a.scan": scope.ExtractorSpec(fields={"target": "host"})},
+            "a.scan",
+            {"target": "evil.example"},
+        ),
+        ({}, "a.scan", {"x": "1"}),
+        ({"a.scan": scope.ExtractorSpec(local_only=True)}, "a.scan", {"x": "1"}),
+    ]
+    for i, (specs, qn, raw) in enumerate(cases):
+        store = scope.ScopeStore(tmp_path / f"scope{i}.db", "probe-audit")
+        store.add_adhoc("host.example", reason="in")
+        before = len(_rows(store))
+        _evaluate_mode(_invocation(qn, raw), store, _dataset(specs), "probe")
+        assert len(_rows(store)) == before, (qn, raw)
+        # sanity: enforce DOES write a row for the same call.
+        _evaluate_mode(_invocation(qn, raw), store, _dataset(specs), "enforce")
+        assert len(_rows(store)) == before + 1, (qn, raw)
 
 
 @dataclass(frozen=True)

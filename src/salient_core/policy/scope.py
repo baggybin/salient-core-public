@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from .decision import InvocationIdentity, InvocationTransport, ToolInvocation
 from .scope_evaluation import evaluate_scope
+from .scope_placeholders import unresolved_operator_infra_placeholder
 
 if TYPE_CHECKING:
     from .registry import PolicyDataset
@@ -1242,6 +1243,14 @@ def _extract_one(
     Malformed values STILL raise even when optional — missing-field is OK,
     bad-data is not."""
     raw = args.get(field)
+
+    placeholder = unresolved_operator_infra_placeholder(raw)
+    if placeholder is not None:
+        raise ExtractorError(
+            f"field {field!r} contains unresolved operator-infrastructure "
+            f"placeholder {placeholder!r}; substitute the engagement's real "
+            "listener value before calling the tool"
+        )
 
     if kind in ("ip_optional", "host_optional"):
         if raw in (None, "", []):

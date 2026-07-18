@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from .decision import FrozenInput, FrozenValue, InputValue, ToolInvocation
 from .scope_audit import ScopeAudit, scope_audit
@@ -90,10 +90,28 @@ async def evaluate_scope(
     invocation: ToolInvocation,
     store: ScopeStore,
     dataset: PolicyDataset | ScopeEvaluationRequest | None = None,
+    *,
+    mode: Literal["enforce", "probe"] = "enforce",
 ) -> ScopeEvaluation:
-    """Classify, evaluate, and durably record at most one scope decision."""
+    """Classify, evaluate, and durably record at most one scope decision.
+
+    ``mode="probe"`` computes the IDENTICAL verdict but READ-ONLY: it writes no
+    audit row and consumes no one-shot rule (routes the strict lane through
+    ``store.dry_check`` — the read-only twin of ``store.check``). The enforce
+    path is byte-for-byte unchanged. A caller previewing what the gate WOULD
+    decide (the ``scope gate-probe`` RPC) passes ``mode="probe"``; the gate
+    dispatch never does. Verdict parity is pinned by the enforce==probe matrix
+    test in tests/ — the anti-drift guarantee that the probe cannot lie.
+    """
     from . import scope
     from .registry import PolicyDataset, get_active
+
+    def _emit(audit: ScopeAudit) -> None:
+        # Single choke point for the durable audit write: it happens ONLY when
+        # enforcing. A new evaluate_scope branch that calls _emit cannot leak an
+        # audit row into probe mode, because it never touches `mode` itself.
+        if mode == "enforce":
+            _record(invocation, store, audit)
 
     match dataset:
         case ScopeEvaluationRequest(dataset=request_dataset, allow_research=allow_research):
@@ -111,7 +129,7 @@ async def evaluate_scope(
             decisions=[],
             summary=f"tool {invocation.wire_name!r} has no scope classification",
         )
-        _record(invocation, store, scope_audit(invocation, (), check))
+        _emit(scope_audit(invocation, (), check))
         return ScopeEvaluation(
             allowed=False,
             kind=ScopeEvaluationKind.UNCLASSIFIED,
@@ -145,7 +163,7 @@ async def evaluate_scope(
             decisions=[],
             summary="local-only tool — scope check skipped",
         )
-        _record(invocation, store, scope_audit(invocation, (), check))
+        _emit(scope_audit(invocation, (), check))
         return ScopeEvaluation(
             allowed=True,
             kind=ScopeEvaluationKind.LOCAL_ONLY,
@@ -162,7 +180,7 @@ async def evaluate_scope(
             decisions=[],
             summary=f"extractor: {error}",
         )
-        _record(invocation, store, scope_audit(invocation, (), check))
+        _emit(scope_audit(invocation, (), check))
         return ScopeEvaluation(
             allowed=False,
             kind=ScopeEvaluationKind.EXTRACTION_DENIED,
@@ -176,7 +194,7 @@ async def evaluate_scope(
             decisions=[],
             summary="extraction returned no targets — call allowed",
         )
-        _record(invocation, store, scope_audit(invocation, (), check))
+        _emit(scope_audit(invocation, (), check))
         return ScopeEvaluation(
             allowed=True,
             kind=ScopeEvaluationKind.EMPTY_TARGETS,
@@ -196,9 +214,13 @@ async def evaluate_scope(
         )
         kind = ScopeEvaluationKind.RESEARCH
     else:
-        check = store.check(list(extracted))
+        # Probe mode uses dry_check — identical verdict, never consumes a
+        # one-shot rule. (The research lane's check_research is already
+        # store-read-only, so it needs no probe variant.)
+        run_check = store.check if mode == "enforce" else store.dry_check
+        check = run_check(list(extracted))
         kind = ScopeEvaluationKind.STRICT
-    _record(invocation, store, scope_audit(invocation, extracted, check))
+    _emit(scope_audit(invocation, extracted, check))
     if check.allowed:
         return ScopeEvaluation(
             allowed=True,
