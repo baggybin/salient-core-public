@@ -1,6 +1,6 @@
 [project]
 name = "salient-core"
-version = "0.7.6"
+version = "0.7.17"
 description = "A multi-agent coordination kernel with policy gates, knowledge graph, and operator-mediated delegation."
 readme = "README.md"
 license = "Apache-2.0"
