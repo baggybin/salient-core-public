@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.17] - 2026-07-18
+
+Third public snapshot, consolidating public sync work since `0.7.6`
+(private PRs #58–#75).
+
+### Added
+- **`salient_core.worker_protocol`** — new self-contained package: a
+  length-prefixed frame codec, typed messages (hello / ping / call / control),
+  a multiplex session with a STOP property, a fake transport, and golden
+  wire-format fixtures.
+- **`SALIENT_CODEX_BIN` seam** — point the Codex provider at an
+  operator-supplied `codex` binary (unset → the bundled codex, unchanged).
+- **Read-only probe mode for `evaluate_scope`** — classify a target against
+  scope without mutating evaluation state; new `scope_placeholders` module.
+- `LocalClaudeBackend` exported on the public surface, plus a codex read-only
+  classifier.
+
+### Changed
+- **Arg/schema-aware Codex gateway timeout** — the blunt 120s ceiling no longer
+  kills legitimately-long foreground tools. `_tool_timeout` reads a tool's args
+  and schema: `ask_*` delegation keeps its 4h wait; a tool whose schema declares
+  `timeout_s` gets the hard-max backstop; an explicit caller `timeout_s` is
+  honored, floored at 120s and clamped at 7800s.
+- **Agent file-write confinement** — builtin file tools resolve their cwd via a
+  per-agent scratch dir (`$SALIENT_AGENT_SCRATCH`, default `~/.salient/scratch`,
+  created 0700) when no engagement is active — never the daemon's launch cwd.
+- **`worker_hub` injected into the tool-factory config** so a remote-worker
+  factory can forward `remote.*` calls to an enrolled worker.
+- Runner hard cap now defaults from the config's `max_turns`.
+
+### Fixed
+- **Codex bus-gateway race** — a URL-stable gateway plus a `wait_attached` fault
+  stops `ask_agent` being silently dropped when the MCP bus rebuilds.
+- **tool_search deferral** — bus tools stay surfaced under codex ≥0.144's
+  hardcoded `tool_search` deferral; non-prefixed tool names supported.
+- Non-finite `timeout_s` (`Infinity` / `NaN`) is rejected before it can raise
+  `OverflowError` on the codex dispatch path.
+- **Hardened `raw_argv` target extraction** — refuses integer-encoded /
+  octal-dotted IPs and closes obfuscation gaps.
+
 ### Removed
 - Dropped an optional, self-contained auxiliary module (and its packaging
   entry points and tests) that is no longer required by the kernel. It had no
