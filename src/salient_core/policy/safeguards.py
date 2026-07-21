@@ -15,12 +15,24 @@ without dooming the engagement.
 from __future__ import annotations
 
 import re
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .registry import PolicyDataset
+
+
+class OperatorPromptMode(StrEnum):
+    LOG = "log"
+    SOFT_REFUSE = "soft_refuse"
+    HARD_REFUSE = "hard_refuse"
+
+
+class OperatorPromptModeError(ValueError):
+    pass
 
 
 @dataclass
@@ -30,6 +42,7 @@ class SafeguardConfig:
 
     enabled: bool = True
     halt_threshold: int = 3
+    operator_prompt_mode: OperatorPromptMode = OperatorPromptMode.LOG
     # Engagement posture — how conservatively the operator paces the run.
     #   "stealth" — least-noise default; high-impact / high-signal
     #               actions are gated at the wire (see check_posture)
@@ -321,12 +334,10 @@ def check_prompt_intent(
     """Scan an operator prompt for natural-language
     operational-boundary markers.
 
-    Same return shape as `check_intent`: `(allowed, reason)`. Unlike the
-    tool-level check, the caller is expected to use this for LOGGING
-    plus optional soft-refuse-via-additionalContext on the model side —
-    the UserPromptSubmit SDK hook can't hard-refuse a prompt. For hard
-    refuse, gate at the daemon's job-submission entry point using the
-    same `(allowed, reason)` return value.
+    Same return shape as `check_intent`: `(allowed, reason)`. Callers use this
+    for logging, optional hook-specific additional context, or the SDK hook's
+    top-level terminal `decision: block`. The daemon job-admission gate remains
+    the primary transport-neutral hard-refusal boundary.
     """
     if config is not None and not config.enabled:
         return True, ""
@@ -376,6 +387,29 @@ def resolve_config(
             p = str(source["posture"]).strip().lower()
             if p in _POSTURE_LEVELS:
                 cfg.posture = p
+        if "operator_prompt_mode" in source:
+            try:
+                cfg.operator_prompt_mode = OperatorPromptMode(
+                    str(source["operator_prompt_mode"]).strip().lower()
+                )
+            except ValueError as error:
+                modes = ", ".join(mode.value for mode in OperatorPromptMode)
+                raise OperatorPromptModeError(
+                    f"invalid safeguards.operator_prompt_mode "
+                    f"{source['operator_prompt_mode']!r}; expected one of: {modes}"
+                ) from error
+        elif "refuse_operator_prompts" in source:
+            warnings.warn(
+                "safeguards.refuse_operator_prompts is deprecated; use "
+                "operator_prompt_mode: soft_refuse",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            cfg.operator_prompt_mode = (
+                OperatorPromptMode.SOFT_REFUSE
+                if source["refuse_operator_prompts"] is True
+                else OperatorPromptMode.LOG
+            )
         extras = source.get("extra_patterns")
         if isinstance(extras, dict):
             for k, v in extras.items():

@@ -8,6 +8,7 @@ as before — Daemon assembles them via multiple inheritance.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -27,6 +28,7 @@ from urllib.parse import urlparse
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
 from ..bus import get_bus_builder, make_bus_tool_bundle, make_bus_tools
+from ..policy.registry import PolicyDataset, get_active
 
 
 # Engagement profile resolution is downstream SKIN (registered via
@@ -174,40 +176,104 @@ class _RunnerFactoryMixin:
 
         return hook
 
-    def _make_prompt_safeguard_hook(self, agent_name: str):
+    def _make_prompt_safeguard_hook(
+        self,
+        agent_name: str,
+        *,
+        agent_cfg: dict[str, Any] | None = None,
+        dataset: PolicyDataset | None = None,
+    ):
         """UserPromptSubmit hook — scan the operator's prompt for
         natural-language prohibited-intent markers (restricted or
         high-impact requests, etc.).
 
-        The SDK's UserPromptSubmit output schema only supports
-        `additionalContext` (string appended to prompt); it CANNOT
-        hard-refuse. So this hook's job is:
+        UserPromptSubmit's hook-specific output only adds context, while its
+        top-level `decision: block` terminally refuses before Claude. This
+        hook's job is:
 
           1. LOG-ONLY (default): emit a structured
              `safeguard_prompt_flag` event for visibility. The model
              still sees the prompt and decides what to do. Anthropic's
              own safeguards remain the enforcement floor.
-          2. SOFT-REFUSE (`refuse_operator_prompts: true` in profile):
+          2. SOFT-REFUSE (`operator_prompt_mode: soft_refuse`):
              prepend a strong directive instructing the model to refuse
              the work and ask the operator to rephrase. Not a hard
              block, but the model honors directives reliably.
+          3. HARD-REFUSE (`operator_prompt_mode: hard_refuse`): normally the
+             runner gate already terminated the job. If a live config race or
+             internal backend path reaches this hook, return the SDK's terminal
+             block decision and record the match here as the sole observer.
 
         Either way, this fires BEFORE the operator's prompt becomes a
         tool call — the tool-level safeguard hook catches the actual
         action if any slips through.
         """
-        from ..policy.safeguards import check_prompt_intent, resolve_config
+        runner_at_creation = self.runners.get(agent_name)
+        captured_agent_cfg = copy.deepcopy(
+            agent_cfg
+            if agent_cfg is not None
+            else ((runner_at_creation.cfg if runner_at_creation else None) or {})
+        )
+        captured_dataset = (
+            dataset if dataset is not None else getattr(runner_at_creation, "_policy_dataset", None)
+        )
+
+        from ..policy.safeguards import (
+            OperatorPromptMode,
+            OperatorPromptModeError,
+            check_prompt_intent,
+            resolve_config,
+        )
 
         async def hook(input_data, tool_use_id, context):  # noqa: ARG001
             prompt = (input_data or {}).get("prompt") or ""
             if not isinstance(prompt, str) or not prompt.strip():
                 return {}
 
-            runner = self.runners.get(agent_name)
-            agent_cfg = (runner.cfg if runner else None) or {}
-            cfg = resolve_config(agent_cfg, self.profile)
+            runner = self.runners.get(agent_name) or runner_at_creation
+            try:
+                cfg = resolve_config(captured_agent_cfg, self.profile)
+            except OperatorPromptModeError:
+                config_error_payload = {
+                    "agent": agent_name,
+                    "reason": "invalid_operator_prompt_mode",
+                }
+                if runner is not None:
+                    runner._publish(
+                        "safeguard_prompt_config_error",
+                        "invalid safeguard configuration",
+                        meta=config_error_payload,
+                    )
+                    await runner._record_jsonl(
+                        "safeguard_prompt_config_error",
+                        config_error_payload,
+                    )
+                return {
+                    "decision": "block",
+                    "reason": "invalid safeguard configuration",
+                }
 
-            allowed, reason = check_prompt_intent(prompt, config=cfg)
+            match cfg.operator_prompt_mode:
+                case OperatorPromptMode.HARD_REFUSE:
+                    soft_refuse = True
+                    redact_prompt = True
+                    hard_enforcement = True
+                case OperatorPromptMode.LOG:
+                    soft_refuse = False
+                    redact_prompt = False
+                    hard_enforcement = False
+                case OperatorPromptMode.SOFT_REFUSE:
+                    soft_refuse = True
+                    redact_prompt = False
+                    hard_enforcement = False
+                case unreachable:
+                    assert_never(unreachable)
+
+            allowed, reason = check_prompt_intent(
+                prompt,
+                config=cfg,
+                dataset=captured_dataset,
+            )
             if allowed:
                 return {}
 
@@ -216,25 +282,45 @@ class _RunnerFactoryMixin:
             # will be cheaply refused once the threshold trips.
             if runner is not None:
                 runner.total_safeguard_blocks += 1
-            count = runner.total_safeguard_blocks if runner else 0
+                if hard_enforcement:
+                    runner.total_prompt_hard_blocks += 1
+            count = (
+                runner.total_prompt_hard_blocks
+                if runner is not None and hard_enforcement
+                else (runner.total_safeguard_blocks if runner else 0)
+            )
 
             if runner is not None:
+                payload = {
+                    "agent": agent_name,
+                    "reason": reason,
+                    "count": count,
+                    "halt_at": cfg.halt_threshold,
+                    "mode": cfg.operator_prompt_mode.value,
+                }
+                if not redact_prompt:
+                    payload["prompt"] = prompt[:600]
+                else:
+                    runner._publish(
+                        "safeguard_prompt_flag",
+                        "operator prompt flagged",
+                        meta=payload,
+                    )
                 await runner._record_jsonl(
                     "safeguard_prompt_flag",
-                    {
-                        "agent": agent_name,
-                        "reason": reason,
-                        "prompt": prompt[:600],
-                        "count": count,
-                        "halt_at": cfg.halt_threshold,
-                        "mode": ("soft-refuse" if self._refuse_operator_prompts() else "log-only"),
-                    },
+                    payload,
                 )
 
-            if not self._refuse_operator_prompts():
+            if not soft_refuse:
                 # LOG-ONLY — don't pollute the prompt; the visibility is
                 # in the structured event for the operator.
                 return {}
+
+            if hard_enforcement:
+                return {
+                    "decision": "block",
+                    "reason": "operator prompt blocked by safeguards",
+                }
 
             # SOFT-REFUSE — prepend a directive the model honors.
             #
@@ -262,15 +348,6 @@ class _RunnerFactoryMixin:
             }
 
         return hook
-
-    def _refuse_operator_prompts(self) -> bool:
-        """Profile knob: when true, prompt-level safeguard matches
-        trigger a soft-refuse via additionalContext. Default false —
-        prompt-level is LOG-ONLY by default to avoid false-positives
-        on operators pasting reference reports / playbooks / review
-        notes that quote restricted material verbatim."""
-        sg = (self.profile or {}).get("safeguards") or {}
-        return bool(sg.get("refuse_operator_prompts", False))
 
     def _make_budget_chip_hook(self, agent_name: str):
         """PreToolUse hook that injects a `[budget: N/M]` chip into the
@@ -1391,10 +1468,19 @@ class _RunnerFactoryMixin:
         hooks_cfg["PreToolUse"] = pre_tool_hooks
         # UserPromptSubmit — prompt-level safeguard, complementary to
         # tool-level. Default LOG-ONLY (additionalContext untouched);
-        # profile flag `safeguards.refuse_operator_prompts: true` flips
-        # to soft-refuse via additionalContext directive.
+        # `safeguards.operator_prompt_mode: soft_refuse` flips to a
+        # model-side additionalContext directive. Hard refusal happens at
+        # the transport-neutral runner boundary before backend dispatch.
         hooks_cfg["UserPromptSubmit"] = [
-            HookMatcher(hooks=[self._make_prompt_safeguard_hook(cfg["name"])]),
+            HookMatcher(
+                hooks=[
+                    self._make_prompt_safeguard_hook(
+                        cfg["name"],
+                        agent_cfg=cfg,
+                        dataset=get_active(),
+                    )
+                ]
+            ),
         ]
         opt_kwargs: dict[str, Any] = {
             "system_prompt": self._augment_system_prompt(cfg),

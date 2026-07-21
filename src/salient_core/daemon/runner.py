@@ -95,7 +95,13 @@ from ..memory.actions import extract_target_keys_from_text, target_key_for_call
 from ..memory.credentials import cred_kinds, predicate_for_kind
 from ..policy.decision import ToolInvocation, text_identity
 from ..policy.registry import PolicyDataset, get_active
-from ..policy.safeguards import SafeguardConfig
+from ..policy.safeguards import (
+    OperatorPromptMode,
+    OperatorPromptModeError,
+    SafeguardConfig,
+    check_prompt_intent,
+    resolve_config,
+)
 from ..policy.scope import ScopeStore
 from ..protocols import AgentBackend, DaemonServices
 from ..runtime import (
@@ -195,6 +201,7 @@ class AgentRunner:
     # further tool calls until the operator resets the agent — gives one
     # false-positive trip without dooming the engagement.
     total_safeguard_blocks: int = 0
+    total_prompt_hard_blocks: int = 0
     last_input_tokens: int = 0
     last_output_tokens: int = 0
     # Tokens accumulated since the last checkpoint (manual or auto). Used
@@ -1703,6 +1710,68 @@ class AgentRunner:
                 await asyncio.sleep(backoff)
                 self._backend = self._create_backend()  # fresh credential for the retry
 
+    async def _hard_refuse_operator_prompt(self, job: Job) -> bool:
+        daemon_profile = getattr(self._daemon, "profile", None)
+        try:
+            config = resolve_config(self.cfg, daemon_profile)
+        except OperatorPromptModeError as error:
+            job.error = f"invalid safeguard configuration: {error}"
+            meta = {
+                "agent": self.name,
+                "job_id": job.id,
+                "reason": "invalid_operator_prompt_mode",
+            }
+            self._publish(
+                "safeguard_prompt_config_error", "invalid safeguard configuration", meta=meta
+            )
+            await self._record_jsonl("safeguard_prompt_config_error", meta)
+            return True
+        self._safeguard_config = config
+        match config.operator_prompt_mode:
+            case OperatorPromptMode.HARD_REFUSE:
+                pass
+            case OperatorPromptMode.LOG | OperatorPromptMode.SOFT_REFUSE:
+                return False
+            case unreachable:
+                assert_never(unreachable)
+        if self.total_prompt_hard_blocks >= config.halt_threshold:
+            job.error = (
+                f"runner halted after {self.total_prompt_hard_blocks}/"
+                f"{config.halt_threshold} safeguard blocks; reset required"
+            )
+            meta = {
+                "agent": self.name,
+                "job_id": job.id,
+                "reason": "halt_threshold_reached",
+                "mode": config.operator_prompt_mode.value,
+                "count": self.total_prompt_hard_blocks,
+                "halt_at": config.halt_threshold,
+            }
+            self._publish("safeguard_prompt_halt", "runner halted by safeguards", meta=meta)
+            await self._record_jsonl("safeguard_prompt_halt", meta)
+            return True
+        allowed, reason = check_prompt_intent(
+            job.prompt,
+            config=config,
+            dataset=self._policy_dataset,
+        )
+        if allowed:
+            return False
+        self.total_safeguard_blocks += 1
+        self.total_prompt_hard_blocks += 1
+        job.error = f"operator prompt blocked by safeguard: {reason}"
+        meta = {
+            "agent": self.name,
+            "job_id": job.id,
+            "reason": reason,
+            "mode": OperatorPromptMode.HARD_REFUSE.value,
+            "count": self.total_prompt_hard_blocks,
+            "halt_at": config.halt_threshold,
+        }
+        self._publish("safeguard_prompt_block", "operator prompt blocked", meta=meta)
+        await self._record_jsonl("safeguard_prompt_block", meta)
+        return True
+
     async def _run(self) -> None:
         try:
             self._backend = self._create_backend()
@@ -1731,7 +1800,8 @@ class AgentRunner:
                 job.started_at = time.time()
                 # Per-turn processing + bounded auto-recovery from an
                 # OAuth-rotation 401 (see _dispatch_job / _run_job).
-                await self._dispatch_job(job)
+                if not await self._hard_refuse_operator_prompt(job):
+                    await self._dispatch_job(job)
                 job.finished_at = time.time()
                 self.last_active = job.finished_at
                 self._record_job_history(job)
