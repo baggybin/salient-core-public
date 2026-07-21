@@ -8,7 +8,7 @@ from typing import Final, assert_never
 
 from .decision import InputValue
 
-_OPERATOR_INFRA: Final = re.compile(r"<(?:lhost|lport)>", re.IGNORECASE)
+_OPERATOR_INFRA: Final = re.compile(r"<(?:[lr]host|[lr]port)>", re.IGNORECASE)
 
 
 def unresolved_operator_infra_placeholder(value: InputValue) -> str | None:

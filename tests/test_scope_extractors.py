@@ -165,6 +165,30 @@ class GenericExtractorTests(unittest.TestCase):
                         {"cmd": command},
                     )
 
+    def test_declared_target_fields_refuse_operator_infra_placeholders(self):
+        cases = (
+            ("ip_or_host", "<lhost>"),
+            ("host", "relay.<RHOST>"),
+            ("url", "https://<LHOST>/callback"),
+            ("endpoint", "<rhost>:<rport>"),
+            ("cidr_list", ["10.0.0.0/24", "<lhost>"]),
+        )
+        for kind, value in cases:
+            with self.subTest(kind=kind, value=value):
+                with self.assertRaisesRegex(
+                    ExtractorError,
+                    "unresolved operator-infrastructure placeholder",
+                ):
+                    extract_targets(ExtractorSpec(fields={"target": kind}), {"target": value})
+
+    def test_unlisted_metadata_may_contain_operator_infra_placeholders(self):
+        targets = extract_targets(
+            ExtractorSpec(fields={"target": "ip_or_host"}),
+            {"target": "10.0.0.5", "note": "connect back to <lhost>"},
+        )
+
+        self.assertEqual(_kv(targets), [("ip", "10.0.0.5")])
+
     # ── raw_argv hardening: IPv6 sweep, NFKC, decode→exec, spliced literals ──
     def test_raw_argv_extracts_ipv6(self):
         # IPv6 targets were invisible to the (IPv4-only) sweep before — a raw_argv
@@ -297,6 +321,21 @@ class ExtractorRegistryTests(unittest.TestCase):
             ExtractorSpec(fields={"x": "skin_sibling"}), {"x": "present", "sibling": "10.0.0.9"}
         )
         self.assertEqual(_kv(ts), [("ip", "10.0.0.9")])
+
+    def test_registered_extractor_cannot_emit_placeholder_from_sibling_arg(self):
+        def _skin_extractor(ctx):
+            return [Target(kind="host", value=ctx.args["sibling"], source_field=ctx.field)]
+
+        register_extractor("skin_sibling", _skin_extractor)
+
+        with self.assertRaisesRegex(
+            ExtractorError,
+            "unresolved operator-infrastructure placeholder",
+        ):
+            extract_targets(
+                ExtractorSpec(fields={"x": "skin_sibling"}),
+                {"x": "present", "sibling": "<rhost>"},
+            )
 
     def test_cannot_register_reserved_core_kind(self):
         with self.assertRaises(ExtractorError) as cm:

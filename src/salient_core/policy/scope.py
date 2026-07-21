@@ -1448,6 +1448,14 @@ def extract_targets(spec: ExtractorSpec, args: dict[str, Any]) -> list[Target]:
                 optional=spec.at_least_one,
             )
         )
+    for target in out:
+        placeholder = unresolved_operator_infra_placeholder(target.value)
+        if placeholder is not None:
+            raise ExtractorError(
+                "extracted target contains unresolved operator-infrastructure "
+                f"placeholder {placeholder!r} from field {target.source_field!r}; "
+                "substitute the engagement's real target value before calling the tool"
+            )
     if spec.at_least_one and spec.fields and not out:
         raise ExtractorError(
             f"none of {list(spec.fields)} were set — at least one target "
